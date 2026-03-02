@@ -43,6 +43,12 @@
         .table-container::-webkit-scrollbar-thumb:hover {
             background: rgba(255,255,255,0.2);
         }
+
+        /* 셀렉트 박스 커스텀 */
+        select option {
+            background-color: #1e293b; /* 옵션 드롭다운 배경색 */
+            color: #f8fafc;
+        }
     </style>
 </head>
 <body class="relative min-h-screen overflow-x-hidden flex flex-col">
@@ -69,10 +75,21 @@
         <!-- 대시보드 컨텐츠 (데이터 로드 완료 전까지 숨김) -->
         <div id="dashboard-content" class="hidden space-y-8">
             
+            <!-- 필터(동네 선택) 영역 -->
+            <div class="flex justify-end items-center mb-2">
+                <div class="glass-card px-4 py-2 flex items-center space-x-3">
+                    <label for="dong-filter" class="text-gray-300 text-sm font-medium">법정동 선택:</label>
+                    <select id="dong-filter" class="bg-transparent text-white border-b border-gray-600 pb-1 focus:outline-none focus:border-blue-400 cursor-pointer text-base">
+                        <option value="all">전체</option>
+                        <!-- JS로 옵션 동적 추가 -->
+                    </select>
+                </div>
+            </div>
+
             <!-- 상단 요약 카드 (총 건수, 평균, 최고, 최저) -->
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                 <div class="glass-card p-6 flex flex-col justify-center">
-                    <h3 class="text-gray-400 text-sm font-medium mb-1">전체 거래 건수</h3>
+                    <h3 class="text-gray-400 text-sm font-medium mb-1">거래 건수</h3>
                     <p class="text-3xl font-bold text-white"><span id="total-count">0</span><span class="text-lg font-normal text-gray-400 ml-1">건</span></p>
                 </div>
                 <div class="glass-card p-6 flex flex-col justify-center border-t-4 border-t-blue-500">
@@ -137,13 +154,20 @@
         // 사용자가 제공한 구글 시트 CSV URL
         const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQptLwiiDpU2ZD3cxHtScWBoEpv2nOuNnzjsz8g3uH-Puij_Mo5zg-8rXDLVZygoEFgJpLNKcPpwd69/pub?gid=1098369868&single=true&output=csv';
 
-        // 숫자 포맷 유틸리티 (천 단위 콤마)
-        const formatNumber = (num) => new Intl.NumberFormat('ko-KR').format(Math.round(num));
+        // 전역 상태 변수
+        let globalTransactions = []; // 정제된 전체 데이터 저장용
+        let currentChart = null; // Chart.js 인스턴스 저장용
 
-        // 날짜에서 'YYYY-MM' 추출 유틸리티 (차트 그룹핑용)
+        // 숫자 포맷 유틸리티 (천 단위 콤마)
+        const formatNumber = (num) => {
+            if (num === Infinity || num === -Infinity || isNaN(num)) return '0';
+            return new Intl.NumberFormat('ko-KR').format(Math.round(num));
+        };
+
+        // 날짜에서 'YYYY-MM' 추출 유틸리티
         const extractYearMonth = (dateStr) => {
             if (!dateStr) return '알수없음';
-            const cleanStr = dateStr.replace(/[^0-9]/g, ''); // 숫자만 추출
+            const cleanStr = dateStr.replace(/[^0-9]/g, '');
             if (cleanStr.length >= 6) {
                 return cleanStr.substring(0, 4) + '-' + cleanStr.substring(4, 6);
             }
@@ -157,7 +181,7 @@
                 header: true,
                 skipEmptyLines: true,
                 complete: function(results) {
-                    processData(results.data);
+                    processInitialData(results.data);
                 },
                 error: function(err) {
                     console.error("CSV 파싱 오류:", err);
@@ -169,15 +193,9 @@
             });
         });
 
-        // 데이터 처리 및 화면 렌더링 함수
-        function processData(data) {
-            let totalTransactions = 0;
-            let sumPrice = 0;
-            let maxPrice = -Infinity;
-            let minPrice = Infinity;
-            
-            const monthlyData = {};
-            const tableBody = document.getElementById('table-body');
+        // 초기 데이터 정제 및 드롭다운 세팅
+        function processInitialData(rawData) {
+            const uniqueDongs = new Set();
             
             // CSV 헤더 이름에 띄어쓰기 등 변수가 있을 경우를 대비한 헬퍼 함수
             const getCol = (row, possibleNames) => {
@@ -187,74 +205,64 @@
                 return "";
             };
 
-            data.forEach(row => {
+            // 1. 데이터 파싱 및 저장
+            rawData.forEach(row => {
                 const dateRaw = getCol(row, ['거래일자', '일자']);
                 const aptName = getCol(row, ['아파트명', '아파트']);
-                const dong = getCol(row, ['법정동', '동']);
+                const dong = getCol(row, ['법정동', '동']).trim();
                 const area = getCol(row, ['전용면적', '면적']);
                 const floor = getCol(row, ['층']);
                 const priceRaw = getCol(row, ['거래금액', '금액']);
                 const buildYear = getCol(row, ['건축년도', '년도']);
 
-                // 필수 데이터가 없으면 건너뜀
                 if (!priceRaw || !dateRaw) return; 
 
-                // 가격을 숫자로 변환 (콤마 등 불필요한 문자 제거)
                 const price = parseInt(priceRaw.toString().replace(/[^0-9]/g, ''), 10);
                 if (isNaN(price)) return;
 
-                // 1. 요약 통계 계산
-                totalTransactions++;
-                sumPrice += price;
-                if (price > maxPrice) maxPrice = price;
-                if (price < minPrice) minPrice = price;
-
-                // 2. 월별 데이터 집계 (차트용)
                 const month = extractYearMonth(dateRaw);
-                if (!monthlyData[month]) {
-                    monthlyData[month] = { sum: 0, count: 0 };
-                }
-                monthlyData[month].sum += price;
-                monthlyData[month].count++;
 
-                // 3. 테이블 행(Row) 생성
-                const tr = document.createElement('tr');
-                tr.className = 'hover:bg-white/5 transition-colors duration-200';
-                tr.innerHTML = `
-                    <td class="p-3 whitespace-nowrap text-gray-300">${dateRaw}</td>
-                    <td class="p-3 font-medium text-blue-300">${aptName}</td>
-                    <td class="p-3 text-gray-300">${dong}</td>
-                    <td class="p-3 text-gray-300">${area}</td>
-                    <td class="p-3 text-gray-300">${floor}</td>
-                    <td class="p-3 font-bold text-white">${formatNumber(price)}</td>
-                    <td class="p-3 text-gray-400">${buildYear}</td>
-                `;
-                tableBody.appendChild(tr);
+                // 메모리에 깔끔한 객체 형태로 저장
+                globalTransactions.push({
+                    dateRaw, aptName, dong, area, floor, price, buildYear, month
+                });
+
+                if (dong) uniqueDongs.add(dong);
             });
 
-            // 유효한 데이터가 없을 경우 처리
-            if (totalTransactions === 0) {
-                const statusMsg = document.getElementById('status-message');
-                statusMsg.innerText = "유효한 거래 데이터가 없습니다.";
+            if (globalTransactions.length === 0) {
+                document.getElementById('status-message').innerText = "유효한 거래 데이터가 없습니다.";
                 document.getElementById('loading').style.display = 'none';
                 return;
             }
 
-            // 요약 정보 화면에 반영
-            document.getElementById('total-count').innerText = formatNumber(totalTransactions);
-            document.getElementById('avg-price').innerText = formatNumber(sumPrice / totalTransactions);
-            document.getElementById('max-price').innerText = formatNumber(maxPrice);
-            document.getElementById('min-price').innerText = formatNumber(minPrice);
+            // 2. 동네(법정동) 필터 드롭다운 옵션 추가
+            const filterSelect = document.getElementById('dong-filter');
+            const sortedDongs = Array.from(uniqueDongs).sort();
+            
+            sortedDongs.forEach(dongName => {
+                const option = document.createElement('option');
+                option.value = dongName;
+                option.textContent = dongName;
+                filterSelect.appendChild(option);
+            });
 
-            // 차트 렌더링
-            renderChart(monthlyData);
+            // 3. 필터 변경 이벤트 리스너 등록
+            filterSelect.addEventListener('change', (e) => {
+                const selectedDong = e.target.value;
+                if (selectedDong === 'all') {
+                    updateDashboard(globalTransactions);
+                } else {
+                    const filteredData = globalTransactions.filter(item => item.dong === selectedDong);
+                    updateDashboard(filteredData);
+                }
+            });
 
-            // 로딩 숨기고 대시보드 표시
+            // 4. 로딩 숨기고 대시보드 화면 표시 후 전체 데이터 렌더링
             const statusMsg = document.getElementById('status-message');
             statusMsg.innerText = "최신 실거래가 데이터를 성공적으로 불러왔습니다.";
             statusMsg.classList.replace('text-gray-400', 'text-green-400');
             
-            // 2초 뒤에 상태 메시지 서서히 사라지게 하기
             setTimeout(() => {
                 statusMsg.style.transition = "opacity 1s ease";
                 statusMsg.style.opacity = "0";
@@ -262,38 +270,101 @@
 
             document.getElementById('loading').style.display = 'none';
             document.getElementById('dashboard-content').classList.remove('hidden');
+
+            // 초기 전체 데이터로 화면 렌더링
+            updateDashboard(globalTransactions);
         }
 
-        // Chart.js를 이용한 월별 추이 차트 생성 함수
+        // 선택된 데이터(전체 or 필터링)를 바탕으로 대시보드 화면 업데이트
+        function updateDashboard(data) {
+            let totalTransactions = data.length;
+            let sumPrice = 0;
+            let maxPrice = -Infinity;
+            let minPrice = Infinity;
+            
+            const monthlyData = {};
+            const tableBody = document.getElementById('table-body');
+            tableBody.innerHTML = ''; // 테이블 초기화
+
+            data.forEach(item => {
+                // 요약 통계 계산
+                sumPrice += item.price;
+                if (item.price > maxPrice) maxPrice = item.price;
+                if (item.price < minPrice) minPrice = item.price;
+
+                // 월별 데이터 집계 (차트용)
+                if (!monthlyData[item.month]) {
+                    monthlyData[item.month] = { sum: 0, count: 0 };
+                }
+                monthlyData[item.month].sum += item.price;
+                monthlyData[item.month].count++;
+
+                // 테이블 행 생성
+                const tr = document.createElement('tr');
+                tr.className = 'hover:bg-white/5 transition-colors duration-200';
+                tr.innerHTML = `
+                    <td class="p-3 whitespace-nowrap text-gray-300">${item.dateRaw}</td>
+                    <td class="p-3 font-medium text-blue-300">${item.aptName}</td>
+                    <td class="p-3 text-gray-300">${item.dong}</td>
+                    <td class="p-3 text-gray-300">${item.area}</td>
+                    <td class="p-3 text-gray-300">${item.floor}</td>
+                    <td class="p-3 font-bold text-white">${formatNumber(item.price)}</td>
+                    <td class="p-3 text-gray-400">${item.buildYear}</td>
+                `;
+                tableBody.appendChild(tr);
+            });
+
+            // 데이터가 아예 없을 경우 예외 처리 (방어 코드)
+            if (totalTransactions === 0) {
+                sumPrice = 0; maxPrice = 0; minPrice = 0;
+                tableBody.innerHTML = `<tr><td colspan="7" class="p-6 text-center text-gray-500">선택한 조건의 거래 내역이 없습니다.</td></tr>`;
+            }
+
+            // 요약 정보 화면에 반영
+            document.getElementById('total-count').innerText = formatNumber(totalTransactions);
+            document.getElementById('avg-price').innerText = totalTransactions > 0 ? formatNumber(sumPrice / totalTransactions) : 0;
+            document.getElementById('max-price').innerText = totalTransactions > 0 ? formatNumber(maxPrice) : 0;
+            document.getElementById('min-price').innerText = totalTransactions > 0 ? formatNumber(minPrice) : 0;
+
+            // 차트 다시 그리기
+            renderChart(monthlyData);
+        }
+
+        // Chart.js를 이용한 월별 추이 차트 생성/업데이트 함수
         function renderChart(monthlyData) {
             const ctx = document.getElementById('priceChart').getContext('2d');
             
+            // 기존 차트가 있으면 삭제 후 새로 생성 (업데이트 시 중첩 방지)
+            if (currentChart) {
+                currentChart.destroy();
+            }
+
             // 월별로 정렬 (오름차순)
             const labels = Object.keys(monthlyData).sort();
             const dataPoints = labels.map(month => Math.round(monthlyData[month].sum / monthlyData[month].count));
 
             // 라인 아래 채워질 그라데이션 색상 설정
             const gradient = ctx.createLinearGradient(0, 0, 0, 400);
-            gradient.addColorStop(0, 'rgba(59, 130, 246, 0.5)'); // Tailwind blue-500 반투명
+            gradient.addColorStop(0, 'rgba(59, 130, 246, 0.5)');
             gradient.addColorStop(1, 'rgba(59, 130, 246, 0.0)');
 
-            new Chart(ctx, {
+            currentChart = new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: labels,
                     datasets: [{
-                        label: '월별 평균 거래가격 (만원)',
+                        label: '평균 거래가격 (만원)',
                         data: dataPoints,
-                        borderColor: '#3b82f6', // blue-500
+                        borderColor: '#3b82f6',
                         backgroundColor: gradient,
                         borderWidth: 3,
-                        pointBackgroundColor: '#a855f7', // purple-500
+                        pointBackgroundColor: '#a855f7',
                         pointBorderColor: '#ffffff',
                         pointBorderWidth: 2,
                         pointRadius: 5,
                         pointHoverRadius: 7,
                         fill: true,
-                        tension: 0.4 // 곡선을 부드럽게
+                        tension: 0.4
                     }]
                 },
                 options: {
@@ -301,12 +372,7 @@
                     maintainAspectRatio: false,
                     plugins: {
                         legend: {
-                            labels: {
-                                color: '#e2e8f0', // 글씨 색상
-                                font: {
-                                    family: "'Pretendard', sans-serif"
-                                }
-                            }
+                            labels: { color: '#e2e8f0', font: { family: "'Pretendard', sans-serif" } }
                         },
                         tooltip: {
                             backgroundColor: 'rgba(15, 23, 42, 0.9)',
@@ -324,24 +390,14 @@
                     },
                     scales: {
                         x: {
-                            grid: {
-                                color: 'rgba(255, 255, 255, 0.05)',
-                                drawBorder: false
-                            },
-                            ticks: {
-                                color: '#94a3b8'
-                            }
+                            grid: { color: 'rgba(255, 255, 255, 0.05)', drawBorder: false },
+                            ticks: { color: '#94a3b8' }
                         },
                         y: {
-                            grid: {
-                                color: 'rgba(255, 255, 255, 0.05)',
-                                drawBorder: false
-                            },
+                            grid: { color: 'rgba(255, 255, 255, 0.05)', drawBorder: false },
                             ticks: {
                                 color: '#94a3b8',
-                                callback: function(value) {
-                                    return formatNumber(value);
-                                }
+                                callback: function(value) { return formatNumber(value); }
                             }
                         }
                     }
